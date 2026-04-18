@@ -2,6 +2,7 @@
 node_modules/
 backend/node_modules/
 frontend/node_modules/
+frontend/src/firebase.js
 
 # Firebase Keys (Crucial for security)
 backend/firebase-key.json
