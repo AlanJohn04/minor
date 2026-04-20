@@ -9,57 +9,62 @@ function isNearDestination(lat1, lng1, lat2, lng2) {
 }
 
 router.post("/", async (req, res) => {
+  console.log(">>> POST /api/scan received:", JSON.stringify(req.body));
   try {
-    const { qr, lat, lng } = req.body;
-
-    const [userId, from, to] = qr.split("|");
-
-    const ticketRef = db.collection("tickets").doc(userId);
+    const body = req.body;
     const busRef = db.collection("bus_status").doc("BUS101");
 
-    const ticketDoc = await ticketRef.get();
-    const busDoc = await busRef.get();
-
-    if (!ticketDoc.exists) {
-      return res.json({ status: "INVALID_TICKET" });
+    // Fetch existing data for merge fallback
+    let existingData = global.latestBusData;
+    if (!existingData) {
+      const busDoc = await busRef.get();
+      existingData = busDoc.exists ? busDoc.data() : { passenger_count: 0, location: { lat: 0, lng: 0 }, speed: 0 };
     }
 
-    let passengerCount = busDoc.exists ? busDoc.data().passenger_count : 0;
-    const ticket = ticketDoc.data();
+    const qr = body.qr || "BUS_UPDATE";
+    const lat = body.lat !== undefined ? body.lat : (existingData.location?.lat || 0);
+    const lng = body.lng !== undefined ? body.lng : (existingData.location?.lng || 0);
+    const passengerCount = (body.count !== undefined) ? body.count : ((body.passenger_count !== undefined) ? body.passenger_count : (existingData.passenger_count || 0));
+    const speed = body.speed !== undefined ? body.speed : (existingData.speed || 0);
 
-    let action = "";
+    // If it's a hardware update (no qr field, or qr is BUS_UPDATE)
+    if (qr === "BUS_UPDATE") {
+      const updateObj = {
+        passenger_count: passengerCount,
+        location: { lat, lng },
+        speed: speed,
+        last_updated: new Date()
+      };
+      
+      // Update cache
+      global.latestBusData = updateObj;
+
+      // Update Firestore (non-blocking for hardware speed)
+      busRef.set(updateObj, { merge: true }).catch(e => console.error("Firebase sync delayed:", e.message));
+      
+      console.log(`>>> SYNC OK: count=${passengerCount}, lat=${lat}, lng=${lng}, speed=${speed}`);
+      return res.json({ status: "SUCCESS", action: "SYNC" });
+    }
+
+    // Otherwise, handle it as a QR scan from the webapp
+    const [userId, from, to] = qr.split("|");
+    const ticketRef = db.collection("tickets").doc(userId || "GUEST");
+    const ticketDoc = await ticketRef.get();
+
+    let action = "UNKNOWN";
     let warning = "";
 
-    // ENTRY
-    if (ticket.status === "NOT_USED") {
-      action = "ENTRY";
-      passengerCount++;
-
-      await ticketRef.update({ status: "IN_PROGRESS" });
-
-    // EXIT
-    } else if (ticket.status === "IN_PROGRESS") {
-
-      // get destination coordinates
-      const destDoc = await db.collection("stops").doc(to).get();
-
-      if (destDoc.exists) {
-        const dest = destDoc.data();
-
-        if (isNearDestination(lat, lng, dest.lat, dest.lng)) {
-          action = "EXIT";
-          passengerCount--;
-
-          await ticketRef.update({ status: "COMPLETED" });
-        } else {
-          warning = "WRONG_STOP_EXIT";
-        }
-      } else {
-        warning = "DEST_NOT_FOUND";
+    if (ticketDoc.exists) {
+      const ticket = ticketDoc.data();
+      if (ticket.status === "NOT_USED") {
+        action = "ENTRY";
+        await ticketRef.update({ status: "IN_PROGRESS" });
+      } else if (ticket.status === "IN_PROGRESS") {
+        action = "EXIT";
+        await ticketRef.update({ status: "COMPLETED" });
       }
-
     } else {
-      return res.json({ status: "ALREADY_USED" });
+      action = "GUEST_SCAN";
     }
 
     // Update bus status
@@ -67,18 +72,15 @@ router.post("/", async (req, res) => {
       passenger_count: passengerCount,
       location: { lat, lng },
       last_updated: new Date()
-    });
+    }, { merge: true });
 
-    // Log scan
+    // Log the scan event
     await db.collection("scans").add({
-      userId,
-      from,
-      to,
+      userId: userId || "GUEST",
       action,
-      lat,
-      lng,
-      warning,
-      time: new Date()
+      location: { lat, lng },
+      time: new Date(),
+      passenger_count: passengerCount
     });
 
     return res.json({

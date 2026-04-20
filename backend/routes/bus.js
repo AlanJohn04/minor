@@ -14,7 +14,12 @@ router.get("/", async (req, res) => {
   };
 
   try {
-    const busDoc = await withTimeout(db.collection("bus_status").doc("BUS101").get(), 2000);
+    // ZER0-LATENCY OVERRIDE: Pull instantly from local memory if available
+    if (global.latestBusData) {
+      return res.json(global.latestBusData);
+    }
+
+    const busDoc = await withTimeout(db.collection("bus_status").doc("BUS101").get(), 10000);
     console.log("Bus doc retrieved from Firestore");
     if (busDoc.exists) {
       res.json(busDoc.data());

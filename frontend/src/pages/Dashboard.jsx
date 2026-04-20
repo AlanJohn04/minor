@@ -6,7 +6,7 @@ function Dashboard() {
   useEffect(() => {
     const fetchCount = async () => {
       try {
-        const res = await fetch("http://localhost:3000/api/bus");
+        const res = await fetch(`http://${window.location.hostname}:3000/api/bus`);
         const data = await res.json();
         setCount(data.passenger_count || 0);
       } catch (err) {
@@ -15,7 +15,7 @@ function Dashboard() {
     };
 
     fetchCount();
-    const interval = setInterval(fetchCount, 3000);
+    const interval = setInterval(fetchCount, 750);
     return () => clearInterval(interval);
   }, []);
 

@@ -23,12 +23,12 @@ function App() {
     return <div className="login-container"><h2>Loading...</h2></div>;
   }
 
-  if (!user) {
-    return <Login onLogin={setUser} />;
-  }
-
   if (!role) {
     return <RoleSelection onSelect={setRole} />;
+  }
+
+  if (!user) {
+    return <Login onLogin={setUser} />;
   }
 
   return (

@@ -1,0 +1,425 @@
+
+--- FILE: esp32\real.ino ---
+
+#include <Adafruit_GFX.h>    
+#include <Adafruit_ST7789.h> 
+#include <SPI.h>
+#include <TinyGPS++.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+// --- WIFI & SERVER CONFIG ---
+const char* ssid = "ABC";
+const char* password = "alan1234";
+const char* serverURL = "http://192.168.137.1:3000/api/scan"; // WINDOWS HOTSPOT IP
+
+// --- TFT PINS ---
+#define TFT_CS     5
+#define TFT_RST    15
+#define TFT_DC     2
+
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+
+// --- PIN DEFINITIONS ---
+const int IR_1 = 26; 
+const int IR_2 = 27; 
+const int BUZZER_SIG = 4; 
+#define RXD2 16
+#define TXD2 17
+
+// --- VARIABLES ---
+const int MAX_CAPACITY = 21;
+int passengerCount = 0;
+
+int state = 0; 
+unsigned long timeout = 0;
+unsigned long clearTimer = 0; 
+unsigned long lastSync = 0;
+
+unsigned long lastBuzzerToggle = 0;
+bool buzzerOn = false;
+bool gpsLocked = false;
+
+TinyGPSPlus gps;
+HardwareSerial neogps(1); 
+
+void setup() {
+  Serial.begin(115200);
+  neogps.begin(9600, SERIAL_8N1, RXD2, TXD2);
+  
+  pinMode(IR_1, INPUT);
+  pinMode(IR_2, INPUT);
+  pinMode(BUZZER_SIG, OUTPUT);
+
+  // TFT Initialize
+  tft.init(240, 320);   
+  tft.setRotation(3);   
+  tft.fillScreen(ST77XX_BLACK);
+  
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(60, 10);
+  tft.println("SMART BUS SYSTEM");
+  tft.drawFastHLine(0, 35, 320, ST77XX_BLUE);
+  
+  tft.setCursor(20, 55);
+  tft.println("PASSENGER COUNT:");
+  tft.setCursor(20, 145);
+  tft.println("GPS LOCATION:");
+
+  tone(BUZZER_SIG, 1000, 200); 
+  
+  // WiFi Init
+  WiFi.begin(ssid, password);
+  updateDisplay(); 
+}
+
+void sendData() {
+  Serial.println("--- sendData() called ---");
+  Serial.print("WiFi Status: ");
+  Serial.println(WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DISCONNECTED");
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(serverURL);
+    http.addHeader("Content-Type", "application/json");
+
+    String json = "{";
+    json += "\"qr\":\"BUS_UPDATE\",";
+    json += "\"lat\":" + String(gps.location.lat(), 6) + ",";
+    json += "\"lng\":" + String(gps.location.lng(), 6) + ",";
+    json += "\"passenger_count\":" + String(passengerCount);
+    json += "}";
+
+    Serial.print("Sending to: ");
+    Serial.println(serverURL);
+    Serial.print("JSON: ");
+    Serial.println(json);
+
+    int httpCode = http.POST(json);
+    
+    Serial.print("HTTP Response Code: ");
+    Serial.println(httpCode);
+    
+    if (httpCode > 0) {
+      Serial.println("Response: " + http.getString());
+    } else {
+      Serial.println("ERROR: " + http.errorToString(httpCode));
+    }
+    
+    http.end();
+  } else {
+    Serial.println("SKIPPED - WiFi not connected");
+  }
+}
+
+void loop() {
+  // 1. GPS Feed
+  while (neogps.available() > 0) {
+    gps.encode(neogps.read());
+  }
+
+  // 2. Periodic Sync (every 10 seconds)
+  if (millis() - lastSync > 10000) {
+    if (WiFi.status() != WL_CONNECTED) {
+       WiFi.begin(ssid, password);
+    }
+    sendData(); // Sends current count and location
+    lastSync = millis();
+  }
+
+  // 3. GPS Lock Notification
+  if (!gpsLocked && gps.location.isValid()) {
+    gpsLocked = true;
+    tone(BUZZER_SIG, 2000, 1000); 
+    updateDisplay(); 
+  }
+
+  int s1 = digitalRead(IR_1);
+  int s2 = digitalRead(IR_2);
+
+  // --- PASSENGER LOGIC ---
+  if (state == 0) {
+    if (s1 == LOW) { state = 1; timeout = millis(); } 
+    else if (s2 == LOW) { state = 2; timeout = millis(); } 
+  }
+  else if (state == 1) {
+    if (s2 == LOW) {
+      if (passengerCount < MAX_CAPACITY) passengerCount++;
+      updateDisplay(); 
+      sendData(); // Sync count change
+      state = 3; 
+      clearTimer = millis(); 
+    }
+  }
+  else if (state == 2) {
+    if (s1 == LOW) {
+      if (passengerCount > 0) passengerCount--;
+      updateDisplay(); 
+      sendData(); // Sync count change
+      state = 3; 
+      clearTimer = millis(); 
+    }
+  }
+  else if (state == 3) {
+    if (s1 == HIGH && s2 == HIGH) {
+      if (millis() - clearTimer > 500) {
+        state = 0; 
+      }
+    } else {
+      clearTimer = millis(); 
+    }
+  }
+
+  if ((state == 1 || state == 2) && (millis() - timeout > 1500)) {
+    state = 0;
+  }
+
+  // --- BUZZER SAFETY ---
+  if (passengerCount >= MAX_CAPACITY) {
+    if (millis() - lastBuzzerToggle >= 400) {
+      buzzerOn = !buzzerOn;
+      if (buzzerOn) tone(BUZZER_SIG, 1500); else noTone(BUZZER_SIG);
+      lastBuzzerToggle = millis();
+    }
+  } else {
+    noTone(BUZZER_SIG);
+    buzzerOn = false;
+  }
+}
+
+void updateDisplay() {
+  tft.fillRect(20, 85, 280, 50, ST77XX_BLACK); 
+  tft.fillRect(20, 175, 280, 55, ST77XX_BLACK);
+
+  tft.setCursor(40, 85);
+  tft.setTextSize(6); 
+  if (passengerCount >= MAX_CAPACITY) tft.setTextColor(ST77XX_RED);
+  else tft.setTextColor(ST77XX_GREEN);
+  tft.print(passengerCount);
+  tft.setTextSize(3);
+  tft.print(" / "); tft.print(MAX_CAPACITY);
+
+  tft.setTextSize(2);
+  tft.setCursor(25, 175);
+  if (gpsLocked) {
+    tft.setTextColor(ST77XX_YELLOW);
+    tft.print("LAT: "); tft.println(gps.location.lat(), 5);
+    tft.setCursor(25, 205);
+    tft.print("LNG: "); tft.println(gps.location.lng(), 5);
+  } else {
+    tft.setTextColor(ST77XX_ORANGE);
+    tft.println("Connecting to Sat...");
+  }
+  
+  // WiFi Status indicator
+  tft.setTextSize(1);
+  tft.setCursor(260, 40);
+  if (WiFi.status() == WL_CONNECTED) {
+    tft.setTextColor(ST77XX_GREEN);
+    tft.print("WIFI OK");
+  } else {
+    tft.setTextColor(ST77XX_RED);
+    tft.print("WIFI NO");
+  }
+}
+
+--- FILE: backend\server.js ---
+
+const express = require('express');
+const cors = require('cors');
+const { admin, db } = require('./firebase');
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const scanRoute = require('./routes/scan');
+const busRoute = require('./routes/bus');
+const scansRoute = require('./routes/scans');
+
+app.use('/api/scan', scanRoute);
+app.use('/api/bus', busRoute);
+app.use('/api/scans', scansRoute);
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server is running on http://0.0.0.0:${PORT}`);
+  console.log(`ESP32 should connect to: http://192.168.137.1:${PORT}/api/scan`);
+});
+
+--- FILE: backend\routes\scan.js ---
+
+const express = require("express");
+const router = express.Router();
+const { db } = require("../firebase");
+
+// Simple distance check (approx)
+function isNearDestination(lat1, lng1, lat2, lng2) {
+  const threshold = 0.01; // ~1km
+  return Math.abs(lat1 - lat2) < threshold && Math.abs(lng1 - lng2) < threshold;
+}
+
+router.post("/", async (req, res) => {
+  console.log(">>> POST /api/scan received:", JSON.stringify(req.body));
+  try {
+    const body = req.body;
+
+    // Handle BOTH ESP32 format {count, lat, lng, speed} 
+    // AND webapp format {qr, lat, lng, passenger_count}
+    const lat = body.lat || 0;
+    const lng = body.lng || 0;
+    const passengerCount = body.count !== undefined ? body.count : (body.passenger_count || 0);
+    const speed = body.speed || 0;
+    const qr = body.qr || "BUS_UPDATE";
+
+    const busRef = db.collection("bus_status").doc("BUS101");
+
+    // If it's a hardware update (no qr field, or qr is BUS_UPDATE)
+    if (qr === "BUS_UPDATE") {
+      // Instantly cache to global memory for zero-latency dashboard updates
+      global.latestBusData = {
+        passenger_count: passengerCount,
+        location: { lat, lng },
+        speed: speed,
+        last_updated: new Date()
+      };
+
+      // Fire-and-forget the Firebase update (no await!), so ESP32 responds instantly
+      busRef.set({
+        passenger_count: passengerCount,
+        location: { lat, lng },
+        speed: speed,
+        last_updated: new Date()
+      }, { merge: true }).catch(e => console.error("Firebase sync delayed:", e.message));
+      
+      console.log(`>>> SYNC OK: count=${passengerCount}, lat=${lat}, lng=${lng}, speed=${speed}`);
+      return res.json({ status: "SUCCESS", action: "SYNC" });
+    }
+
+    // Otherwise, handle it as a QR scan from the webapp
+    const [userId, from, to] = qr.split("|");
+    const ticketRef = db.collection("tickets").doc(userId || "GUEST");
+    const ticketDoc = await ticketRef.get();
+
+    let action = "UNKNOWN";
+    let warning = "";
+
+    if (ticketDoc.exists) {
+      const ticket = ticketDoc.data();
+      if (ticket.status === "NOT_USED") {
+        action = "ENTRY";
+        await ticketRef.update({ status: "IN_PROGRESS" });
+      } else if (ticket.status === "IN_PROGRESS") {
+        action = "EXIT";
+        await ticketRef.update({ status: "COMPLETED" });
+      }
+    } else {
+      action = "GUEST_SCAN";
+    }
+
+    // Update bus status
+    await busRef.set({
+      passenger_count: passengerCount,
+      location: { lat, lng },
+      last_updated: new Date()
+    }, { merge: true });
+
+    // Log the scan event
+    await db.collection("scans").add({
+      userId: userId || "GUEST",
+      action,
+      location: { lat, lng },
+      time: new Date(),
+      passenger_count: passengerCount
+    });
+
+    return res.json({
+      status: "SUCCESS",
+      action,
+      warning
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+module.exports = router;
+
+--- FILE: backend\routes\bus.js ---
+
+const express = require("express");
+const router = express.Router();
+const { db } = require("../firebase");
+
+router.get("/", async (req, res) => {
+  console.log("GET /api/bus received");
+  
+  // Helper to wait with timeout
+  const withTimeout = (promise, ms) => {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), ms))
+    ]);
+  };
+
+  try {
+    // ZER0-LATENCY OVERRIDE: Pull instantly from local memory if available
+    if (global.latestBusData) {
+      return res.json(global.latestBusData);
+    }
+
+    const busDoc = await withTimeout(db.collection("bus_status").doc("BUS101").get(), 10000);
+    console.log("Bus doc retrieved from Firestore");
+    if (busDoc.exists) {
+      res.json(busDoc.data());
+    } else {
+      res.json({ passenger_count: 0, location: { lat: 13.0827, lng: 80.2707 } });
+    }
+  } catch (err) {
+    console.log("Using mock data due to error/timeout:", err.message);
+    // Fallback to mock data for demonstration
+    res.json({ 
+      passenger_count: 12, 
+      location: { lat: 13.0827, lng: 80.2707 },
+      mock: true 
+    });
+  }
+});
+
+module.exports = router;
+
+--- FILE: frontend\src\pages\Dashboard.jsx ---
+
+import { useEffect, useState } from "react";
+
+function Dashboard() {
+  const [count, setCount] = useState(0);
+
+  useEffect(() => {
+    const fetchCount = async () => {
+      try {
+        const res = await fetch("http://localhost:3000/api/bus");
+        const data = await res.json();
+        setCount(data.passenger_count || 0);
+      } catch (err) {
+        console.error("Dashboard fetch error:", err);
+      }
+    };
+
+    fetchCount();
+    const interval = setInterval(fetchCount, 750);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <div>
+      <h2>Real-time Capacity</h2>
+      <div className="passenger-count">{count}</div>
+      <p style={{ color: 'var(--text-muted)' }}>Passengers onboard</p>
+    </div>
+  );
+}
+
+export default Dashboard;

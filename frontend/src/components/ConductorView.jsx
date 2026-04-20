@@ -6,38 +6,82 @@ import BusMap from '../pages/BusMap';
 function ConductorView() {
   const [scanResult, setScanResult] = useState(null);
 
+  const scannerRef = React.useRef(null);
+
   useEffect(() => {
-    const scanner = new Html5QrcodeScanner("reader", {
-      fps: 10,
-      qrbox: { width: 250, height: 250 },
+    if (scannerRef.current) return; // Prevent React Strict Mode double-render crashing camera
+
+    scannerRef.current = new Html5QrcodeScanner("reader", {
+      fps: 30,
+      rememberLastUsedCamera: true
     });
 
-    scanner.render(onScanSuccess, onScanError);
+    scannerRef.current.render(onScanSuccess, onScanError);
 
-    function onScanSuccess(decodedText) {
+    let lastScanTime = 0;
+
+    async function onScanSuccess(decodedText) {
+      if (Date.now() - lastScanTime < 3000) return;
+      lastScanTime = Date.now();
+
       setScanResult(decodedText);
-      // Here you would typically call the backend to validate the scan
       console.log("Scanned:", decodedText);
       
-      // Flash success message
+      // Get browser location synchronously if possible
+      let coords = { lat: 0, lng: 0 };
+      try {
+        const position = await new Promise((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000 });
+        });
+        coords = { lat: position.coords.latitude, lng: position.coords.longitude };
+      } catch (err) {
+        console.warn("Location access denied or timed out:", err);
+      }
+
+      try {
+        const res = await fetch(`http://${window.location.hostname}:3000/api/scan`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ 
+            qr: decodedText,
+            lat: coords.lat,
+            lng: coords.lng
+          })
+        });
+        const data = await res.json();
+        console.log("Backend response:", data);
+      } catch (err) {
+        console.error("Failed to send QR to backend:", err);
+      }
+      
       setTimeout(() => setScanResult(null), 3000);
     }
 
-    function onScanError(err) {
-      // console.warn(err);
-    }
+    function onScanError(err) {}
 
-    return () => scanner.clear();
+    return () => {
+      if (scannerRef.current) {
+        scannerRef.current.clear().then(() => {
+          console.log("Scanner cleared");
+        }).catch(err => {
+          console.error("Failed to clear scanner:", err);
+          // Force remove container content if clear fails to prevent double preview
+          const container = document.getElementById("reader");
+          if (container) container.innerHTML = "";
+        });
+        scannerRef.current = null;
+      }
+    };
   }, []);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-      <div className="card">
+    <div className="conductor-layout">
+      <div className="card scanner-card">
         <h2>QR Code Validator</h2>
-        <div id="reader" className="scanner-container"></div>
+        <div id="reader" className="scanner-ui"></div>
         {scanResult && (
-          <div style={{ marginTop: '1rem', padding: '1rem', background: '#dcfce7', color: '#166534', borderRadius: '0.5rem' }}>
-            Success! Scanned: {scanResult.split('|')[0]}
+          <div className="success-banner">
+            ✅ Validated: {scanResult.split('|')[0].slice(0, 8)}...
           </div>
         )}
       </div>
@@ -45,12 +89,6 @@ function ConductorView() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '2rem' }}>
         <div className="card">
           <Dashboard />
-        </div>
-        <div className="card">
-          <h2>Vehicle Tracking</h2>
-          <div className="map-wrapper">
-            <BusMap />
-          </div>
         </div>
       </div>
     </div>
